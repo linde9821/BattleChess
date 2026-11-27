@@ -80,6 +80,8 @@ namespace
                 " to=" + std::to_string(move.to) + " head=" + std::to_string(animation.scene.head) +
                 " type=" + std::to_string(animation.scene.active[animation.scene.head].type));
         int destination = engine_to_display(move.to);
+        if (animation.mirror3D && !flat)
+            destination = 63 - destination;
         if (!animation.scene.board[destination])
             throw std::runtime_error("Animation lost moving piece");
         ++cases;
@@ -89,6 +91,9 @@ namespace
     {
         // Removing speed dispatch must break the elapsed-time comparison, not just a label check.
         bool savedFast = animation.fast, savedSound = animation.soundEnabled;
+        // Timing does not depend on orientation; its asserts use White-side squares.
+        bool savedMirror = animation.mirror3D;
+        animation.mirror3D = false;
         animation.fast = false;
         animation.soundEnabled = false;
         constexpr double speeds[] = {1.0, 1.25, 1.5, 1.75, 2.0};
@@ -132,6 +137,7 @@ namespace
         animation.speed = 1;
         animation.fast = savedFast;
         animation.soundEnabled = savedSound;
+        animation.mirror3D = savedMirror;
         animation.cancel();
         reset_board(&position);
         exerciseMove(position, {0x34, 0x14, 0, 6, 0}, false);
@@ -449,21 +455,23 @@ void Application::checkBothBoards()
     flat = true;
     session = GameSession();
     performMenuAction(2, kBothBoardsItem);
-    const int dualWidth = logicalWidth + kFlatViewWidth + fillWidth;
-    const int dualHeight = 20 + original_content_height + panelHeight();
+    const int dualWidth = dualCanvasWidth(boardZoom) + fillWidth;
+    const int dualHeight = dualCanvasHeight(boardZoom) + fillHeight;
     if (!bothBoards || flat || !dualView() || viewWidth() != dualWidth ||
-        presentedWidth != dualWidth || dualWidth >= 2 * logicalWidth ||
+        presentedWidth != dualWidth || boardZoom < 1 || boardZoom > kMaxBoardZoom ||
         viewHeight() != dualHeight || presentedHeight != dualHeight)
         throw std::runtime_error("Both-boards layout failed");
     // Select e2 on the perspective board (left) and choose e4 on the flat board (right).
-    auto centre = [](bool viewFlat, int display, int offset)
+    // The perspective board may be zoomed; its squares scale with it.
+    auto centre = [&](bool viewFlat, int display, int offset)
     {
         const int* xs = viewFlat ? flat_hit_x : perspective_hit_x;
         const int* ys = viewFlat ? flat_hit_y : perspective_hit_y;
+        const int zoom = viewFlat ? 1 : boardZoom;
         int row = display / 8, col = display % 8;
         return std::pair<int, int>{
-            offset + (xs[row * 9 + col] + xs[row * 9 + col + 1]) / 2,
-            20 + (ys[row] + ys[row + 1]) / 2
+            offset + zoom * (xs[row * 9 + col] + xs[row * 9 + col + 1]) / 2,
+            20 + zoom * (ys[row] + ys[row + 1]) / 2
         };
     };
     auto [fromX, fromY] = centre(false, 52, 0);
@@ -554,7 +562,7 @@ void Application::checkMovePanel()
         for (const auto& token : panelTokens())
             if (token.ply == ply)
             {
-                int y = 20 + original_content_height + 8 + token.row * 18 + 4;
+                int y = panelGeometry().movesTop + token.row * 18 + 4;
                 handlePointerPress(token.x + 1, y);
                 handlePointerRelease(token.x + 1, y);
                 return;
@@ -569,7 +577,7 @@ void Application::checkMovePanel()
         throw std::runtime_error("Panel click did not replay");
     // Number labels are not moves.
     auto number = panelTokens().front();
-    handlePointerPress(number.x + 1, 20 + original_content_height + 8 + 4);
+    handlePointerPress(number.x + 1, panelGeometry().movesTop + 4);
     if (session.past.size() != 40)
         throw std::runtime_error("Panel number label changed the game");
 
@@ -733,6 +741,35 @@ void Application::checkBoardAids()
         shot("board-rotated-move.png");
         animation.cancel();
     }
+    // Rotate 3D Board Too: the 3D board follows the same orientation, and only then.
+    {
+        flat = false;
+        auto centre3D = [](int screenSquare)
+        {
+            int row = screenSquare / 8, col = screenSquare % 8;
+            return std::pair<int, int>{
+                (perspective_hit_x[row * 9 + col] + perspective_hit_x[row * 9 + col + 1] +
+                 perspective_hit_x[(row + 1) * 9 + col] +
+                 perspective_hit_x[(row + 1) * 9 + col + 1]) / 4,
+                20 + (perspective_hit_y[row] + perspective_hit_y[row + 1]) / 2
+            };
+        };
+        auto [x3, y3] = centre3D(0);
+        if (rotate3D || boardSquareAt(x3, y3) != 0)
+            fail("3D board stays White's side by default");
+        performMenuAction(2, kRotate3DItem);
+        if (!rotate3D || !rotated3D() || boardSquareAt(x3, y3) != 63)
+            fail("rotated 3D top-left is h1");
+        shot("board-rotated-3d.png");
+        performMenuAction(2, kRotateItem);
+        if (rotated3D() || boardSquareAt(x3, y3) != 0)
+            fail("3D board follows Rotate Board");
+        performMenuAction(2, kRotateItem);
+        performMenuAction(2, kRotate3DItem);
+        if (rotate3D || boardSquareAt(x3, y3) != 0)
+            fail("Rotate 3D Board Too off");
+        flat = true;
+    }
     performMenuAction(2, kRotateItem);
     if (rotateFlat || boardSquareAt(topLeftX, topLeftY) != 0)
         fail("rotation off");
@@ -780,7 +817,8 @@ void Application::checkBoardAids()
     // Both boards: the captured row closes the panel.
     load("1. e4 d5 2. exd5 Qxd5 3. Nc3 Qxd2+ 4. Qxd2 Nf6 5. Qxd8+ Kxd8 *");
     setBothBoards(true);
-    if (viewHeight() != 20 + original_content_height + kPanelHeight + fillHeight + kCapturedHeight)
+    if (viewHeight() != dualCanvasHeight(boardZoom) + fillHeight ||
+        panelGeometry().capturedTop + kCapturedHeight != viewHeight())
         fail("panel height with captures");
     shot("board-aids-both.png");
 
@@ -788,7 +826,7 @@ void Application::checkBoardAids()
     // the flat board is centred in the extra width, the move list gains rows.
     {
         const int baseWidth = viewWidth(), baseHeight = viewHeight();
-        const int rowsBefore = (panelTextHeight() - 16) / 18;
+        const int rowsBefore = panelGeometry().movesRows, zoomBefore = boardZoom;
         SDL_SetWindowSize(window, 2 * baseWidth + 100, 2 * baseHeight + 300);
         SDL_SyncWindow(window);
         applyLayout(false);
@@ -796,20 +834,73 @@ void Application::checkBoardAids()
         SDL_GetRenderOutputSize(rendererPtr, &outputWidth, &outputHeight);
         if (outputWidth >= 2 * baseWidth + 100)
         {
-            if (fillWidth != outputWidth / 2 - baseWidth ||
-                fillHeight != outputHeight / 2 - baseHeight || presentedWidth != viewWidth() ||
-                presentedHeight != viewHeight() || (panelTextHeight() - 16) / 18 <= rowsBefore)
+            // The zoom never shrinks in a larger window; the rest is filled at its scale.
+            const int canvasWidth = dualCanvasWidth(boardZoom),
+                      canvasHeight = dualCanvasHeight(boardZoom);
+            const int scale = std::min(outputWidth / canvasWidth, outputHeight / canvasHeight);
+            if (boardZoom < zoomBefore || scale < 1 ||
+                fillWidth != outputWidth / scale - canvasWidth ||
+                fillHeight != outputHeight / scale - canvasHeight ||
+                presentedWidth != viewWidth() || presentedHeight != viewHeight() ||
+                panelGeometry().movesRows <= rowsBefore)
                 fail("extra space filled");
-            if (flatViewOrigin() != logicalWidth + fillWidth / 2)
+            if (flatViewOrigin() != columnLeft() + fillWidth / 2)
                 fail("flat board centred in the extra width");
             // The centre of e4 on the shifted flat board still selects e4.
             int col = 4, row = 4;
             int x = flatViewOrigin() - kFlatViewLeft +
                 (flat_hit_x[row * 9 + col] + flat_hit_x[row * 9 + col + 1]) / 2;
             int y = 20 + (flat_hit_y[row] + flat_hit_y[row + 1]) / 2;
-            if (boardSquareAt(x, y) != row * 8 + col || boardSquareAt(logicalWidth + 2, y) != -1)
+            if (boardSquareAt(x, y) != row * 8 + col || boardSquareAt(columnLeft() + 2, y) != -1)
                 fail("hit test on the centred flat board");
             shot("both-boards-filled.png");
+        }
+        // A window twice the zoom-2 canvas zooms the 3D board: it fills the left, the 2D
+        // board and the stacked panel share the right column, and clicks map back.
+        SDL_SetWindowSize(window, 2 * dualCanvasWidth(2), 2 * dualCanvasHeight(2));
+        SDL_SyncWindow(window);
+        applyLayout(false);
+        SDL_GetRenderOutputSize(rendererPtr, &outputWidth, &outputHeight);
+        if (outputWidth >= 2 * dualCanvasWidth(2) && outputHeight >= 2 * dualCanvasHeight(2))
+        {
+            const PanelGeometry panel = panelGeometry();
+            if (boardZoom < 2 || !largeLayout() || perspectiveRect().w != logicalWidth * boardZoom ||
+                columnLeft() != perspectiveRect().w || !panel.stacked ||
+                panel.left != columnLeft() || panel.top != 20 + original_content_height ||
+                panel.movesRows < 3 || panel.capturedTop != 20 + perspectiveRect().h + fillHeight)
+                fail("zoomed 3D board layout");
+            // e2 at its zoomed position, a8 at the zoomed top-left, and nothing below the board.
+            const int zoom = boardZoom;
+            auto zoomed = [&](int display)
+            {
+                int row = display / 8, col = display % 8;
+                return std::pair<int, int>{
+                    zoom * (perspective_hit_x[row * 9 + col] + perspective_hit_x[row * 9 + col + 1] +
+                            perspective_hit_x[(row + 1) * 9 + col] +
+                            perspective_hit_x[(row + 1) * 9 + col + 1]) / 4,
+                    20 + zoom * (perspective_hit_y[row] + perspective_hit_y[row + 1]) / 2
+                };
+            };
+            for (int display : {0, 7, 52, 63})
+            {
+                auto [x, y] = zoomed(display);
+                if (boardSquareAt(x, y) != display)
+                    fail("hit test on the zoomed 3D board");
+            }
+            if (boardSquareAt(10, 20 + perspectiveRect().h + 1) != -1)
+                fail("below the zoomed 3D board");
+            // Under the 2D board is the panel, not the 3D board: a move there is clickable.
+            auto tokens = panelTokens();
+            if (tokens.empty() || tokens.front().x < panel.left)
+                fail("stacked panel moves");
+            // The flat board still sits at the top of the column.
+            int col = 4, row = 4;
+            int x = flatViewOrigin() - kFlatViewLeft +
+                (flat_hit_x[row * 9 + col] + flat_hit_x[row * 9 + col + 1]) / 2;
+            int y = 20 + (flat_hit_y[row] + flat_hit_y[row + 1]) / 2;
+            if (boardSquareAt(x, y) != row * 8 + col)
+                fail("hit test on the column's flat board");
+            shot("both-boards-zoomed.png");
         }
         applyLayout(true);
         SDL_SyncWindow(window);
@@ -1303,6 +1394,59 @@ void Application::checkPgnImportAndGifExport()
         animation.fast != savedFast || animation.fadeFrame || session.past.size() != 7)
         throw std::runtime_error("GIF export changed live state");
 
+    // Export GIF first asks for a side, defaulting to the side the board is viewed from.
+    // Cancel (click or Escape) leaves no file dialog behind; a side is kept for the export.
+    const bool savedRotate = rotateFlat, savedAuto = autoRotate;
+    autoRotate = false;
+    rotateFlat = true;
+    performMenuAction(0, kExportGifItem);
+    if (alertId != kGifSideAlert || !gifPromptDefaultBlack || fileWaiting)
+        throw std::runtime_error("GIF side prompt did not open from Black's view");
+    if (!options.screenshotPath.empty())
+    {
+        render();
+        Surface image(SDL_RenderReadPixels(rendererPtr, nullptr), SDL_DestroySurface);
+        require(bool(image), "GIF side prompt screenshot");
+        auto shot = options.screenshotPath.parent_path() / "gif-side-prompt.png";
+        require(SDL_SavePNG(image.get(), shot.string().c_str()), "GIF side prompt save");
+    }
+    handlePointerPress(0, 30); // Outside the buttons: nothing happens.
+    handlePointerRelease(0, 30);
+    if (alertId != kGifSideAlert)
+        throw std::runtime_error("GIF side prompt closed on a stray click");
+    {
+        // Cancel is the leftmost of the three buttons (see sidePromptButton).
+        const int boxX = (viewWidth() - 300) / 2, boxY = 20 + (320 - 92) / 2;
+        const int cancelX = boxX + 300 - 14 - 3 * 64 - 2 * 12 + 10, cancelY = boxY + 92 - 12 - 10;
+        handlePointerPress(cancelX, cancelY);
+        handlePointerRelease(cancelX, cancelY);
+    }
+    if (alertId || fileWaiting)
+        throw std::runtime_error("GIF side prompt Cancel failed");
+    rotateFlat = false;
+    performMenuAction(0, kExportGifItem);
+    if (alertId != kGifSideAlert || gifPromptDefaultBlack || !gifSidePromptKey(SDLK_ESCAPE) ||
+        alertId || fileWaiting)
+        throw std::runtime_error("GIF side prompt Escape failed");
+    rotateFlat = savedRotate;
+    autoRotate = savedAuto;
+
+    // From Black's side the export is a different, valid recording of the same game, and
+    // the live state is again untouched.
+    gifFromBlack = true;
+    fs::path blackPath = options.screenshotPath.empty()
+                             ? directory / "mate-black.gif"
+                             : options.screenshotPath.parent_path() / "smoke-export-black.gif";
+    bool blackOk = exportGifFile(blackPath);
+    gifFromBlack = false;
+    std::string black = readBytes(blackPath);
+    if (!blackOk || alertId || black.compare(0, 6, "GIF89a") != 0 || black == single ||
+        lastGifFrames < 40)
+        throw std::runtime_error("GIF export from Black's side failed");
+    if (animation.sharedRandomState() != randomBefore || animation.busy() || animation.mirror3D ||
+        session.past.size() != 7)
+        throw std::runtime_error("Black GIF export changed live state");
+
     // The imported moves are ordinary history: Take Back reopens the game.
     performMenuAction(1, 1);
     if (session.past.size() != 6 || session.endingAnnounced)
@@ -1367,14 +1511,14 @@ void Application::checkMenuTracking()
     {
         handlePointerPress(menuX[2], 6);
         double before = animation.speed;
-        trackMenu(menuX[2] + 20, 26 + 9 * 18);
-        assert(menuItem == 9 && animation.speed == before);
+        trackMenu(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
+        assert(menuItem == kAnimationSpeedItem && animation.speed == before);
         // Keep the parent open on release, then click in the popup to its right.
-        handlePointerRelease(menuX[2] + 20, 26 + 9 * 18);
-        assert(menu == 2 && menuItem == 9 && animation.speed == before);
-        int x = menuX[2] + 270, y = 26 + (9 + choice) * 18;
+        handlePointerRelease(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
+        assert(menu == 2 && menuItem == kAnimationSpeedItem && animation.speed == before);
+        int x = menuX[2] + 270, y = 26 + (kAnimationSpeedItem + choice) * 18;
         trackMenu(x, y);
-        assert(menu == 2 && menuItem == 9 && animation.speed == before);
+        assert(menu == 2 && menuItem == kAnimationSpeedItem && animation.speed == before);
         render();
         if (choice == 2 && !options.screenshotPath.empty())
         {
@@ -1390,17 +1534,17 @@ void Application::checkMenuTracking()
     }
     // Hover across both popups while held; leaving the popup must cancel selection.
     handlePointerPress(menuX[2], 6);
-    trackMenu(menuX[2] + 20, 26 + 9 * 18);
-    trackMenu(menuX[2] + 270, 26 + 11 * 18);
-    handlePointerRelease(menuX[2] + 270, 26 + 11 * 18);
+    trackMenu(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
+    trackMenu(menuX[2] + 270, 26 + (kAnimationSpeedItem + 2) * 18);
+    handlePointerRelease(menuX[2] + 270, 26 + (kAnimationSpeedItem + 2) * 18);
     assert(menu == -1 && animation.speed == 1.5);
     handlePointerPress(menuX[2], 6);
-    trackMenu(menuX[2] + 20, 26 + 9 * 18);
-    trackMenu(menuX[2] + 270, 26 + 13 * 18);
+    trackMenu(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
+    trackMenu(menuX[2] + 270, 26 + (kAnimationSpeedItem + 4) * 18);
     handlePointerRelease(500, 300);
     assert(menu == -1 && animation.speed == 1.5);
     handlePointerPress(menuX[2], 6);
-    trackMenu(menuX[2] + 20, 26 + 9 * 18);
+    trackMenu(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
     trackMenu(menuX[0], 6);
     handlePointerRelease(menuX[0], 6); // Dragging back onto a title leaves that menu open.
     assert(menu == 0 && menuItem == -1 && animation.speed == 1.5);
@@ -1408,7 +1552,7 @@ void Application::checkMenuTracking()
     handlePointerRelease(menuX[0], 6);
     assert(menu == -1 && animation.speed == 1.5);
     handlePointerPress(menuX[2], 6);
-    trackMenu(menuX[2] + 20, 26 + 9 * 18);
+    trackMenu(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
     SDL_Event escape{};
     escape.type = SDL_EVENT_KEY_DOWN;
     escape.key.key = SDLK_ESCAPE;
@@ -1455,12 +1599,12 @@ void Application::checkMenuTracking()
     speedBefore = animation.speed;
     handlePointerPress(menuX[2], 6);
     handlePointerRelease(menuX[2], 6);
-    handlePointerPress(menuX[2] + 20, 26 + 9 * 18);
-    handlePointerRelease(menuX[2] + 20, 26 + 9 * 18);
-    assert(menu == 2 && menuItem == 9);
-    trackMenu(menuX[2] + 270, 26 + 13 * 18);
-    handlePointerPress(menuX[2] + 270, 26 + 13 * 18);
-    handlePointerRelease(menuX[2] + 270, 26 + 13 * 18);
+    handlePointerPress(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
+    handlePointerRelease(menuX[2] + 20, 26 + kAnimationSpeedItem * 18);
+    assert(menu == 2 && menuItem == kAnimationSpeedItem);
+    trackMenu(menuX[2] + 270, 26 + (kAnimationSpeedItem + 4) * 18);
+    handlePointerPress(menuX[2] + 270, 26 + (kAnimationSpeedItem + 4) * 18);
+    handlePointerRelease(menuX[2] + 270, 26 + (kAnimationSpeedItem + 4) * 18);
     assert(menu == -1 && animation.speed == 2.0);
     animation.speed = speedBefore;
 }

@@ -73,6 +73,8 @@ struct ApplicationOptions
     bool modemQuitWindow = false;
     bool smoke = false, check = false, flat = false, animationCheck = false, modemCheck = false;
     bool both = false;
+    // --rotate-3d: start with Settings → Rotate 3D Board Too switched on.
+    bool rotate3D = false;
 };
 
 /* Renderer-owned artwork, loaded once and shared by every host drawing path. */
@@ -116,12 +118,13 @@ private:
     bool menuSticky = false;
     // Native menu rows appended to File (menu 0) and Settings (menu 2).
     static constexpr int kExportPgnItem = 8, kImportPgnItem = 9, kExportGifItem = 10;
-    static constexpr int kAnimationSpeedItem = 9, kBothBoardsItem = 10, kFullScreenItem = 11,
-                         kIdleAnimationsItem = 12, kCoordinatesItem = 13, kCapturedItem = 14,
-                         kRotateItem = 15, kAutoRotateItem = 16;
-    // Native rotated 2D board (Settings → Rotate 2D Board): Black's side at the bottom.
-    // With Rotate for Player to Move it follows the player at the Mac instead.
-    bool rotateFlat = false, autoRotate = false;
+    static constexpr int kAnimationSpeedItem = 8, kBothBoardsItem = 9, kFullScreenItem = 10,
+                         kIdleAnimationsItem = 11, kCoordinatesItem = 12, kCapturedItem = 13,
+                         kRotateItem = 14, kAutoRotateItem = 15, kRotate3DItem = 16;
+    // Native board orientation (Settings → Rotate Board): Black's side at the bottom.
+    // With Rotate for Player to Move it follows the player at the Mac instead. It always
+    // turns the 2D board; Rotate 3D Board Too applies it to the 3D board as well.
+    bool rotateFlat = false, autoRotate = false, rotate3D = false;
     void updateAutoRotate();
     // Native board aids, on by default (Settings → Show Coordinates / Show Captured Pieces).
     bool showCoordinates = true, showCaptured = true;
@@ -153,12 +156,16 @@ private:
     // Native alert commands beyond the original ones.
     static constexpr int kConfirmAcceptChallenge = 20, kConfirmAcceptDraw = 21,
                          kConfirmResign = 22;
+    // Native GIF side prompt, held in alertId so every modal guard pauses play; no ALRT.
+    static constexpr int kGifSideAlert = 950;
     LichessState lichess;
     // Native, opt-in bishop idle clips (Settings → Idle Animations).
     IdleAnimator idle;
     bool idleAllowed() const;
     void updateIdle();
     int lastGifFrames = 0, gifProgressFrames = 0;
+    // The side the next GIF export shows the 3D board from, chosen in the side prompt.
+    bool gifFromBlack = false, gifPromptDefaultBlack = false;
     bool gifProgressCaptured = false;
     // Native side-by-side view: perspective board left, flat board right.
     bool bothBoards = false, flatBeforeBoth = false;
@@ -167,8 +174,37 @@ private:
     // an enlarged window): extra width centres the flat board, extra height lengthens the
     // move list, so the screen is used instead of padded.
     int fillWidth = 0, fillHeight = 0;
+    /* Whole-number zoom of the 3D board over the rest of the both-boards canvas. At 1 the
+     * panel spans the width under both boards; from 2 up the zoomed 3D board fills the
+     * left and the right column stacks the 2D board over the panel. applyLayout picks
+     * the zoom that shows the 3D board largest on the current window or screen. */
+    int boardZoom = 1;
+    static constexpr int kMaxBoardZoom = 4;
+    bool largeLayout() const
+    {
+        return dualView() && boardZoom > 1;
+    }
+    int dualCanvasWidth(int zoom) const;
+    int dualCanvasHeight(int zoom) const;
+    // Left edge of the right column (the 2D board and, when zoomed, the panel).
+    int columnLeft() const;
+    // The 3D board's content area on the canvas, below the menu bar.
+    SDL_Rect perspectiveRect() const;
+    // Whether a canvas point lies on a board (for the board cursors).
+    bool overBoard(int x, int y) const;
+    // The zoomed 3D board is drawn at the original size here, then scaled up.
+    Texture perspectiveTarget{nullptr, SDL_DestroyTexture};
     int flatViewOrigin() const;
     int panelTextHeight() const;
+    // Where the panel's parts sit: one row under both boards, or stacked in the column.
+    struct PanelGeometry
+    {
+        int left, top, width, height; // Status and moves, without the captured strip.
+        int movesLeft, movesRight, movesTop, movesRows;
+        int capturedLeft, capturedTop, capturedWidth;
+        bool stacked;
+    };
+    PanelGeometry panelGeometry() const;
     SDL_RendererLogicalPresentation presentedMode = SDL_LOGICAL_PRESENTATION_DISABLED;
     // Information panel under both boards (ApplicationPanel.cpp).
     static constexpr int kPanelHeight = 112;
@@ -240,6 +276,11 @@ private:
 
     // Animated GIF export (ApplicationRecord.cpp).
     void openGifDialog();
+    void renderGifSidePrompt();
+    void gifSidePromptRelease(int x, int y);
+    bool gifSidePromptKey(SDL_Keycode key);
+    // 0 cancels, 1 exports from White's side, 2 from Black's.
+    void chooseGifSide(int choice);
     bool exportGifFile(fs::path path);
     bool menuItemEnabled(int menu, int item);
     void performMenuAction(int menu, int item);
@@ -256,6 +297,11 @@ private:
     void handlePointerRelease(int x, int y);
     void handlePointerPress(int x, int y);
     int boardSquareAt(int x, int y) const;
+    // The 3D board is drawn from Black's side (Settings → Rotate 3D Board Too).
+    bool rotated3D() const
+    {
+        return rotate3D && rotateFlat;
+    }
     void setBothBoards(bool on);
 
     // Turn scheduling and remote play (ApplicationGame.cpp).
@@ -346,7 +392,7 @@ private:
     int panelHeight() const;
     // Pieces of each engine side (0 White, 1 Black) captured so far, most valuable first.
     std::array<std::vector<uint8_t>, 2> capturedPieces() const;
-    void renderCaptured(int top, int width);
+    void renderCaptured(int left, int top, int width);
     void renderBelowBoard();
     void renderCoordinates(bool viewFlat);
     const std::vector<std::string>& panelMoves();

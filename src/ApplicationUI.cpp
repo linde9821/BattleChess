@@ -52,15 +52,17 @@ const OriginalMenu& Application::menuResource(int index)
             std::vector<OriginalItem> items(std::begin(menu_403), std::end(menu_403));
             items.insert(items.end(),
                          {
-                             {"-", 0},
+                             // No separator row: a divider is drawn above this item so
+                             // the menu fits the shortest window (see renderMenus).
                              {"Animation Speed", 0},
                              {"Show Both Boards", 0},
                              {"Enter Full Screen", 0},
                              {"Idle Animations", 0},
                              {"Show Coordinates", 0},
                              {"Show Captured Pieces", 0},
-                             {"Rotate 2D Board", 0},
-                             {"Rotate for Player to Move", 0}
+                             {"Rotate Board", 0},
+                             {"Rotate for Player to Move", 0},
+                             {"Rotate 3D Board Too", 0}
                          });
             return items;
         }();
@@ -336,7 +338,7 @@ bool Application::menuItemEnabled(int m, int item)
                 item == kAnimationSpeedItem || item == kBothBoardsItem ||
                 item == kFullScreenItem || item == kCoordinatesItem ||
                 item == kCapturedItem || (item == kRotateItem && !autoRotate) ||
-                item == kAutoRotateItem)) ||
+                item == kAutoRotateItem || item == kRotate3DItem)) ||
             (m == 4 && item == 0);
     if (computer.busy())
         return (m == 1 && item == 0) ||
@@ -345,7 +347,8 @@ bool Application::menuItemEnabled(int m, int item)
             (m == 2 && (item == 2 || item == 3 || item == 5 || item == 6 ||
                 item == kFullScreenItem || item == kIdleAnimationsItem ||
                 item == kCoordinatesItem || item == kCapturedItem ||
-                (item == kRotateItem && !autoRotate) || item == kAutoRotateItem));
+                (item == kRotateItem && !autoRotate) || item == kAutoRotateItem ||
+                item == kRotate3DItem));
     return (m == 0 && (item <= 4 || item == 6 || item == kExportPgnItem ||
             item == kImportPgnItem || item == kExportGifItem)) ||
         (m == 1 &&
@@ -357,7 +360,8 @@ bool Application::menuItemEnabled(int m, int item)
                 item == kAnimationSpeedItem || item == kBothBoardsItem ||
                 item == kFullScreenItem || item == kIdleAnimationsItem ||
                 item == kCoordinatesItem || item == kCapturedItem ||
-                (item == kRotateItem && !autoRotate) || item == kAutoRotateItem)) ||
+                (item == kRotateItem && !autoRotate) || item == kAutoRotateItem ||
+                item == kRotate3DItem)) ||
         (m == 6 && modem.connected() && item >= 0 && item < 4) || (m == 4 && item == 0) ||
         (m == 3 && item >= 0 && item <= 10);
 }
@@ -474,6 +478,11 @@ void Application::performMenuAction(int m, int item)
     }
     if (m == 2 && item == kAutoRotateItem)
         autoRotate = !autoRotate; // Turning it off keeps the current orientation.
+    if (m == 2 && item == kRotate3DItem)
+    {
+        rotate3D = !rotate3D;
+        session.selected = -1;
+    }
     if (m == 2 && item == kCapturedItem)
     {
         showCaptured = !showCaptured;
@@ -657,6 +666,11 @@ void Application::handlePointerRelease(int x, int y)
         lichessLobbyRelease(x, y);
         return;
     }
+    if (alertId == kGifSideAlert && !textDialog.open)
+    {
+        gifSidePromptRelease(x, y);
+        return;
+    }
     const auto* dialog = textDialog.open
                              ? findResourceDialog(textDialog.resourceId, ResourceDialogKind::dialog)
                              : alertId
@@ -707,12 +721,18 @@ int Application::boardSquareAt(int x, int y) const
 {
     // A rotated 2D board shows display square 63 - i where square i would be.
     auto flatSquare = [&](int square) { return square >= 0 && rotateFlat ? 63 - square : square; };
-    if (dualView() && x >= logicalWidth)
+    if (dualView() && x >= columnLeft())
         return x >= flatViewOrigin() && x < flatViewOrigin() + kFlatViewWidth
                    ? flatSquare(original_hit_square(x - flatViewOrigin() + kFlatViewLeft, y - 20,
                                                     true))
                    : -1;
-    int square = original_hit_square(x, y - 20, flat);
+    // The zoomed 3D board maps back to original content coordinates.
+    const int zoom = dualView() ? boardZoom : 1;
+    if (y - 20 >= original_content_height * zoom)
+        return -1;
+    int square = original_hit_square(x / zoom, (y - 20) / zoom, flat);
+    if (!flat && rotated3D() && square >= 0)
+        return 63 - square;
     return flat ? flatSquare(square) : square;
 }
 
@@ -739,14 +759,16 @@ void Application::setBothBoards(bool on)
  * on a human turn, while nothing else animates or waits for an answer. */
 bool Application::idleAllowed() const
 {
-    return !flat && !editing && !lichess.inGame && !animation.busy() && !session.pending &&
+    // Idle clips are placed in White-side screen squares; not yet for a rotated 3D board.
+    return !flat && !rotated3D() && !editing && !lichess.inGame && !animation.busy() && !session.pending &&
         !session.promotionWalk && !session.mateAnimationDone && session.promotion.empty() &&
         menu < 0 && !alertId && !textDialog.open && !fileWaiting && !computer.busy() &&
         !modem.busy() && playerForSide(settings, session.game.position.side) == 0 &&
         bc_adjudicate(&session.game) == BC_ONGOING;
 }
 
-/* Native over-the-board rotation; no original entry point. The 2D board faces the
+/* Native over-the-board rotation; no original entry point. The 2D board (and the 3D
+ * board with Rotate 3D Board Too) faces the
  * player at the Mac: the side to move when both sides are human, the human side against
  * the Mac, the player's colour on Lichess. It turns only between moves, never while a
  * move animates, and not during board setup. */
@@ -807,6 +829,8 @@ void Application::handlePointerPress(int x, int y)
         }
         return;
     }
+    if (alertId == kGifSideAlert)
+        return; // The side prompt acts on release, like the Lichess prompts.
     if (alertId)
     {
         auto* d = findResourceDialog(alertId, ResourceDialogKind::alert);
@@ -850,13 +874,17 @@ void Application::handlePointerPress(int x, int y)
     }
     if (menu >= 0)
         return;
-    if (dualView() && y >= 20 + original_content_height)
+    if (dualView())
     {
-        handlePanelPress(x, y);
-        return;
+        const PanelGeometry panel = panelGeometry();
+        if (x >= panel.left && y >= panel.top && y < panel.top + panel.height)
+        {
+            handlePanelPress(x, y);
+            return;
+        }
     }
-    if (y >= 20 + original_content_height)
-        return; // The captured strip under the single board.
+    if (!overBoard(x, y))
+        return; // The captured strip, or space beside a zoomed board.
     int display = boardSquareAt(x, y);
     if (editing)
     {

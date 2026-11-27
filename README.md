@@ -16,13 +16,13 @@ This repository is a fork of Kirill Gusev's port ([myaumura/BattleChess](https:/
 |---|---|
 | **Lichess online play** | Connect with a Lichess token, then play the Lichess AI, challenge a friend by username or find an opponent. A lobby lists running games and incoming challenges. Clocks sit in the menu bar; draw offers, resign/abort and leaving a game without resigning are supported. The recovered engine never moves or advises for your account. Animations adapt to the clock and a click skips them. |
 | **Analyse on Lichess** | Uploads the current game and opens Lichess's analysis board; no account needed. |
-| **Both boards + move panel** | Shows the 3D and 2D boards side by side, with whose turn it is, the players and a clickable move list that jumps through the game. |
+| **Both boards + move panel** | Shows the 3D and 2D boards side by side, with whose turn it is, the players and a clickable move list that jumps through the game. On a large enough window or screen the 3D board is zoomed by whole pixels (2x, 3x...) and the 2D board and panel stack beside it. |
 | **PGN import/export** | Writes the session's moves as PGN (with a FEN tag for set-up positions); loads the first game of a PGN file and lets Take Back/Replay step through it. |
 | **Animated GIF export** | Replays the game offscreen through the original movement, combat and checkmate animations at 2x into a GIF, with a progress dialog. |
 | **Sharp scaling and full screen** | Whole-pixel scaling keeps the 1-bit artwork crisp, at full Retina density; full screen with F11 or Control-Command-F. |
 | **Click-to-open menus** | Menus also open with a click and stay open; the original press-drag-release still works. |
 | **Coordinates and captured pieces** | Rank and file labels on the 3D and 2D boards; each side's captured pieces with the material lead under the board (or in the panel). On by default, each can be switched off in Settings. |
-| **Rotating 2D board** | Turns the 2D board so Black's side is at the bottom, by hand or automatically: for two players at one Mac it faces whoever is to move, against the Mac or on Lichess it faces your side. Animations play rotated too. |
+| **Rotating boards** | Turns the board so Black's side is at the bottom, by hand or automatically: for two players at one Mac it faces whoever is to move, against the Mac or on Lichess it faces your side. The 2D board always turns; the 3D board can turn too, with the original animations replayed from Black's side. |
 | **Finished games stay** | The final position remains after the ending message, for review, Take Back and export, until New Game. |
 | **Idle animations (opt-in)** | Lets a bishop play the recovered fidget clips when the board is quiet. |
 | **Research** | Shows from the disassembly that the Mac release never loads its idle animations ([evidence](docs/ROADMAP.md#idle-animations-in-the-macintosh-release)). |
@@ -40,7 +40,7 @@ Everything not listed here follows the recovered original code: move rules, comp
 | End of game | Board cleared after the ending message | Final position stays until New Game (modem games still clear, so both machines stay in step) |
 | Display | Fixed 512×342 screen | Resizable window, whole-pixel scaling, full screen, optional both-boards view |
 | Animation speed | Fixed | 1x to 2x |
-| Board aids | None | Coordinates and captured pieces (on by default), a rotatable 2D board |
+| Board aids | None | Coordinates and captured pieces (on by default), rotatable 2D and 3D boards |
 | Idle bishops | Data present, never played | Optional, off by default |
 | Opponents | Computer, same-machine human, modem | Same, plus Lichess (AI, friends, public seeks) |
 | Files | Own save format | Same, plus PGN import/export and GIF export |
@@ -146,7 +146,7 @@ More in [docs/BUILD.md](docs/BUILD.md).
 4. A pawn reaching the last rank asks which piece it becomes.
 5. When the game ends, a message names the result and the final position stays on the board, ready for **File → Export PGN...** or **Export GIF...**. **File → New Game** starts again.
 
-**Other opponents:** set **Human White** and **Human Black** in Settings for two players at one computer (with **Rotate for Player to Move** the 2D board turns to whoever is on move) (or **Mac White** and **Mac Black** to watch the computer play itself). Over the internet, use [Lichess](#play-on-lichess); over a serial line, start with `--serial DEVICE` and use the Modem menu. **File → Set Up Board...** places pieces freely for a custom position; the Board Setup menu then offers Clear Board, Restore Board and Done.
+**Other opponents:** set **Human White** and **Human Black** in Settings for two players at one computer (with **Rotate for Player to Move** the board turns to whoever is on move) (or **Mac White** and **Mac Black** to watch the computer play itself). Over the internet, use [Lichess](#play-on-lichess); over a serial line, start with `--serial DEVICE` and use the Modem menu. **File → Set Up Board...** places pieces freely for a custom position; the Board Setup menu then offers Clear Board, Restore Board and Done.
 
 ### Menus
 
@@ -154,7 +154,7 @@ More in [docs/BUILD.md](docs/BUILD.md).
 |---|---|
 | File | New Game, Open Game..., Save, Save As..., Set Up Board..., Quit, then Export PGN..., Import PGN..., Export GIF... |
 | Move | Force Move, Take Back, Replay, Suggest Move |
-| Settings | Sound on/off, Switch to 2D/3D Board, Human/Mac/Modem White, Human/Mac/Modem Black, then Animation Speed, Show Both Boards, Enter Full Screen, Idle Animations, Show Coordinates, Show Captured Pieces, Rotate 2D Board, Rotate for Player to Move |
+| Settings | Sound on/off, Switch to 2D/3D Board, Human/Mac/Modem White, Human/Mac/Modem Black, then Animation Speed, Show Both Boards, Enter Full Screen, Idle Animations, Show Coordinates, Show Captured Pieces, Rotate Board, Rotate for Player to Move, Rotate 3D Board Too |
 | Level | Novice, Level 1 to 9, Set Time... |
 | Lichess | Connect..., Forget Lichess Token, Games..., Analyse Game on Lichess, Play Lichess AI, Challenge Player..., Find Opponent, Time, Animations, Offer Draw, Resign, Leave Game (shown when no serial device is open) |
 | Modem | Dial Number..., Hang Up, Set Auto Answer, Talk... (with `--serial`) |
@@ -185,19 +185,20 @@ The File items after Quit, the Settings items after Animation Speed, and the Lic
 
 ### Views and animations
 
-- **Settings → Switch to 2D/3D Board** changes the view; **Show Both Boards** shows both, with the panel underneath. Moves can be made on either board, and clicking a move in the list jumps there. The 3D board animates while the 2D board waits, then catches up. In full screen or a larger window the extra space is used rather than padded: the 2D board moves to the middle of the extra width and the move list grows.
+- **Settings → Switch to 2D/3D Board** changes the view; **Show Both Boards** shows both, with the panel underneath. Moves can be made on either board, and clicking a move in the list jumps there. The 3D board animates while the 2D board waits, then catches up. The layout follows the window: whenever the window or screen is large enough, the 3D board is drawn at a whole multiple of the others' size (2x, 3x...), filling the left, with the 2D board, the status and the move list stacked in a column on the right and the captured pieces underneath. The zoom is whichever shows the 3D board largest; when zooming would not make it larger, the boards sit side by side at the same size with the panel underneath. Remaining space is used rather than padded: the right column widens (with the 2D board in its middle) and the move list grows.
 - **Settings → Animation Speed** plays movement, combat and capture fades at 1x (original), 1.25x, 1.5x, 1.75x or 2x.
 - **Settings → Enter Full Screen** fills the display; the picture is always scaled by whole pixels unless the window is smaller than the game.
 - **Settings → Show Coordinates** labels ranks and files: in the corners of the 2D board's edge squares, and beside and below the 3D board. **Show Captured Pieces** adds a strip under the board (a row of the panel with both boards) showing what each side has taken, most valuable first, with the material lead.
-- **Settings → Rotate 2D Board** turns the 2D board by 180 degrees, with Black's side at the bottom: handy when two players share one computer across the table, or to see the board from Black's side. Pieces, clicks, hints, coordinates and animations all follow; the 3D board keeps the original White's-side view, since its artwork is drawn from that side.
-- **Settings → Rotate for Player to Move** turns the 2D board automatically for play in front of the Mac: with two human players it faces whoever is to move, turning after each move once its animation has finished; against the Mac it faces your side; on Lichess, your colour. While it is on, the manual Rotate 2D Board is disabled; switching it off keeps the current orientation.
+- **Settings → Rotate Board** turns the board by 180 degrees, with Black's side at the bottom: handy when two players share one computer across the table, or to see the board from Black's side. Pieces, clicks, hints, coordinates and animations all follow.
+- **Settings → Rotate for Player to Move** sets that orientation automatically for play in front of the Mac: with two human players it faces whoever is to move, turning after each move once its animation has finished; against the Mac it faces your side; on Lichess, your colour. While it is on, the manual Rotate Board is disabled; switching it off keeps the current orientation.
+- **Settings → Rotate 3D Board Too** chooses which boards the orientation applies to. Off (the default), only the 2D board turns and the 3D board keeps the original White's-side view. On, the 3D board turns as well. The original artwork is drawn from White's side only, so the turned board shows the pieces with their sides swapped for the recovered planner and recolors them back when drawn. The original choreography still plays and every piece faces the right way. Idle animations pause while the 3D board is turned. GIF export asks for its side separately (see below). `--rotate-3d` starts with it switched on.
 - **Settings → Idle Animations** (off by default) lets a bishop fidget after 10–25 quiet seconds on a human's turn; any click or key stops it. The clips are the game's own, but the trigger and timing are this port's invention.
 
 ### Files, PGN and GIF
 
 - **File → Save / Open** use the original save format (with the Mac `Game`/`IPBC` file identity on macOS). The original format stores only the position, so move history is not saved.
 - **File → Export PGN...** writes the moves since the last New Game, Open or board setup; **Import PGN...** loads the first game of a file at its final position. Comments, variations and annotations are skipped.
-- **File → Export GIF...** records the game on the 3D board at twice the original speed and double size. A progress dialog shows the move being recorded; the window accepts no input until it finishes.
+- **File → Export GIF...** records the game on the 3D board at twice the original speed and double size. It first asks which side to record from (Cancel / White / Black); the outlined default is the side the board is currently viewed from, Return accepts it, W or B picks a side and Escape cancels. The whole recording keeps that one viewpoint, even with Rotate for Player to Move. A progress dialog shows the move being recorded; the window accepts no input until it finishes.
 - When a game ends (checkmate, stalemate, the computer resigning, or a Lichess result), the final position stays on the board for these exports and for Take Back until **File → New Game**.
 
 ### Play on Lichess
@@ -229,7 +230,6 @@ The **Lichess** menu (in the Modem slot when no serial device is connected) play
 5. **Analyse Game on Lichess** uploads the current game for analysis, without an account. After an online game it opens that game's page.
 
 Not yet supported:
-- the 3D board from Black's side (the 2D board rotates automatically when you play Black);
 - chat and takebacks;
 - claiming a win when the opponent leaves;
 - rated games.
@@ -239,7 +239,7 @@ Not yet supported:
 All tests are C/C++; Python is not required. The core registers 22 tests (20 without libcurl); with the application enabled there are 29. They cover:
 - the recovered engine (move generation, search, evaluation, save format, board setup, time control) and the animation runtime, with 113 animation scenarios;
 - PGN, the GIF encoder (its output was also checked against ffmpeg and ImageMagick), and the Lichess protocol and client;
-- a native smoke test that drives the application headlessly through menus, dialogs, both boards, coordinates and captured pieces, the rotating 2D board (by hand and per player), exports, idle animations and a whole Lichess game with injected server replies.
+- a native smoke test that drives the application headlessly through menus, dialogs, both boards, coordinates and captured pieces, the rotating boards (2D and 3D, by hand and per player), exports, idle animations and a whole Lichess game with injected server replies.
 
 The SDL checks use dummy video and audio drivers, so passing tests do not prove audible sound, and they do not prove equivalence to the original executable.
 

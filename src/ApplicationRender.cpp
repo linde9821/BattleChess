@@ -70,7 +70,42 @@ bool Application::dualView() const
 
 int Application::viewWidth() const
 {
-    return dualView() ? logicalWidth + kFlatViewWidth + fillWidth : logicalWidth;
+    return dualView() ? dualCanvasWidth(boardZoom) + fillWidth : logicalWidth;
+}
+
+int Application::dualCanvasWidth(int zoom) const
+{
+    return logicalWidth * zoom + kFlatViewWidth;
+}
+
+/* Zoom 1: both boards over the full-width panel. From zoom 2 the right column beside the
+ * 3D board holds the 2D board and the panel, so the canvas is as tall as the 3D board;
+ * the captured strip runs under everything. */
+int Application::dualCanvasHeight(int zoom) const
+{
+    if (zoom == 1)
+        return 20 + original_content_height + kPanelHeight + (showCaptured ? kCapturedHeight : 0);
+    return 20 + original_content_height * zoom + (showCaptured ? kCapturedHeight : 0);
+}
+
+int Application::columnLeft() const
+{
+    return logicalWidth * (dualView() ? boardZoom : 1);
+}
+
+SDL_Rect Application::perspectiveRect() const
+{
+    const int zoom = dualView() ? boardZoom : 1;
+    return {0, 20, logicalWidth * zoom, original_content_height * zoom};
+}
+
+bool Application::overBoard(int x, int y) const
+{
+    if (x < 0 || x >= viewWidth() || y < 20)
+        return false;
+    if (dualView() && x < columnLeft())
+        return y < 20 + perspectiveRect().h;
+    return y < 20 + original_content_height;
 }
 
 /* Native presentation adapter; no original entry point. Widen the logical canvas for
@@ -79,7 +114,7 @@ int Application::viewWidth() const
  * canvas falls back to fractional letterboxing. */
 int Application::flatViewOrigin() const
 {
-    return logicalWidth + fillWidth / 2;
+    return columnLeft() + fillWidth / 2;
 }
 
 void Application::applyLayout(bool resizeWindow)
@@ -87,6 +122,38 @@ void Application::applyLayout(bool resizeWindow)
     int outputWidth = 0, outputHeight = 0;
     SDL_GetRenderOutputSize(rendererPtr, &outputWidth, &outputHeight);
     fillWidth = fillHeight = 0;
+    /* Both boards: try each 3D zoom and keep the one that shows the 3D board largest on
+     * screen (zoom times whole-pixel scale); on a tie the smaller zoom wins, since it
+     * shows everything else larger too. A window being sized for the canvas measures the
+     * display instead, at most twice the canvas as before. */
+    auto bestZoom = [&](double width, double height, double maxScale, int& scale)
+    {
+        int best = 1;
+        scale = 0;
+        for (int zoom = 1; zoom <= kMaxBoardZoom; ++zoom)
+        {
+            int fit = int(std::min({maxScale, width / dualCanvasWidth(zoom),
+                                    height / dualCanvasHeight(zoom)}));
+            if (fit >= 1 && zoom * fit > best * scale)
+            {
+                best = zoom;
+                scale = fit;
+            }
+        }
+        return best;
+    };
+    if (dualView())
+    {
+        int scale = 0;
+        SDL_Rect usable;
+        if (!resizeWindow)
+            boardZoom = bestZoom(outputWidth, outputHeight, 1e9, scale);
+        else if (SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+            !fullscreen() && display && SDL_GetDisplayUsableBounds(display, &usable))
+            boardZoom = bestZoom(usable.w, usable.h, 2, scale);
+        if (!scale)
+            boardZoom = 1;
+    }
     const int baseWidth = viewWidth(), baseHeight = viewHeight();
     if (dualView() && !resizeWindow && outputWidth >= baseWidth && outputHeight >= baseHeight)
     {
@@ -138,7 +205,30 @@ void Application::renderBoard()
 {
     setGrayscale(rendererPtr, 255);
     require(SDL_RenderClear(rendererPtr), "Clear");
-    renderBoardView(flat, true);
+    if (largeLayout())
+    {
+        // Draw the 3D board at its original size, then scale it up by whole pixels.
+        if (!perspectiveTarget)
+        {
+            perspectiveTarget.reset(SDL_CreateTexture(rendererPtr, SDL_PIXELFORMAT_RGBA32,
+                                                      SDL_TEXTUREACCESS_TARGET, logicalWidth,
+                                                      20 + original_content_height));
+            require(bool(perspectiveTarget), "3D board target");
+            SDL_SetTextureScaleMode(perspectiveTarget.get(), SDL_SCALEMODE_NEAREST);
+        }
+        SDL_Texture* previous = SDL_GetRenderTarget(rendererPtr);
+        require(SDL_SetRenderTarget(rendererPtr, perspectiveTarget.get()), "3D board target");
+        setGrayscale(rendererPtr, 255);
+        require(SDL_RenderClear(rendererPtr), "3D board clear");
+        renderBoardView(false, true);
+        require(SDL_SetRenderTarget(rendererPtr, previous), "Restore target");
+        const SDL_Rect area = perspectiveRect();
+        SDL_FRect src{0, 20, float(logicalWidth), float(original_content_height)};
+        SDL_FRect dst{float(area.x), float(area.y), float(area.w), float(area.h)};
+        require(SDL_RenderTexture(rendererPtr, perspectiveTarget.get(), &src, &dst), "3D board");
+    }
+    else
+        renderBoardView(flat, true);
     if (!dualView())
         return;
     // Shift the flat port so its board grid starts at the seam, and clip away its
@@ -160,8 +250,9 @@ void Application::renderBoardView(bool viewFlat, bool primary)
                               viewFlat ? textures.flatBoard.get() : textures.perspective.get(),
                               &src, &dst),
             "Board");
+    const bool rotatedView = viewFlat ? rotateFlat : rotated3D();
     if (session.selected >= 0)
-        drawSelection(rendererPtr, session.selected, viewFlat, 0, viewFlat && rotateFlat);
+        drawSelection(rendererPtr, session.selected, viewFlat, 0, rotatedView);
     /* Original PRINTHIN (0x66d0): source-first, twenty two-tick phases;
      * destination retains the previous pen until its next scheduled draw. */
     if (hint)
@@ -172,11 +263,12 @@ void Application::renderBoardView(bool viewFlat, bool primary)
             hint.reset();
         else
         {
-            drawSelection(rendererPtr, hint->from, viewFlat, pens.from, viewFlat && rotateFlat);
+            drawSelection(rendererPtr, hint->from, viewFlat, pens.from, rotatedView);
             if (pens.to)
-                drawSelection(rendererPtr, hint->to, viewFlat, pens.to, viewFlat && rotateFlat);
+                drawSelection(rendererPtr, hint->to, viewFlat, pens.to, rotatedView);
         }
     }
+    animation.mirror3D = rotated3D();
     bool originalScene =
         primary && (animation.busy() || session.promotionWalk || session.mateAnimationDone ||
             animation.displays(session.game.position, viewFlat));
@@ -185,8 +277,12 @@ void Application::renderBoardView(bool viewFlat, bool primary)
         animation.draw(false);
     const Position& shown =
         editing ? setup.position : primary ? session.game.position : flatViewPosition();
+    /* A rotated 3D board shows the turned, side-swapped position, so every piece takes the
+     * facing the original gives the side at the bottom; textures use the real side. */
+    const bool mirror3D = !viewFlat && rotated3D();
+    const Position drawn = mirror3D ? AnimationHost::mirroredPosition(shown) : shown;
     uint8_t display[64];
-    setup_display_board(&shown, display);
+    setup_display_board(&drawn, display);
     // Native idle clip: replaces the resting bishop in the original draw order.
     auto idleFrame = primary && !viewFlat && !editing ? idle.current() : std::nullopt;
     // PLACE / INSERTFO: back ranks first, equal-y sprites newest first.
@@ -212,7 +308,7 @@ void Application::renderBoardView(bool viewFlat, bool primary)
                 if (shape < 0 || shape >= count)
                     throw std::runtime_error("Invalid original shape selector");
                 auto s = (viewFlat ? flat_piece_shapes : standing_shapes)[shape];
-                int side = shown.board[display_to_engine(source)].side;
+                int side = drawn.board[display_to_engine(source)].side ^ int(mirror3D);
                 auto& pieces = viewFlat ? textures.flatPieces : textures.standing;
                 auto& t = pieces[side * count + shape];
                 drawTexture(rendererPtr, t.get(), (viewFlat ? flat_x : perspective_x)[i] - s.hx,
@@ -289,14 +385,14 @@ void Application::renderCoordinates(bool viewFlat)
     }
     for (int row = 0; row < 8; ++row)
     {
-        char rank = char('8' - row);
+        char rank = char(rotated3D() ? '1' + row : '8' - row);
         // Beside the row's upper-left corner; the near rows widen towards the screen edge.
         int middle = 20 + (perspective_hit_y[row] + perspective_hit_y[row + 1]) / 2;
         tag(std::max(2, perspective_hit_x[row * 9] - width(rank) - 5), middle - height / 2, rank);
     }
     for (int column = 0; column < 8; ++column)
     {
-        char file = char('a' + column);
+        char file = char(rotated3D() ? 'h' - column : 'a' + column);
         tag(perspective_hit_x[8 * 9 + column + 1] - width(file) - 6, lowest, file);
     }
 }
@@ -345,6 +441,14 @@ void Application::renderMenus()
                 drawRectangle(rendererPtr, menuLeft(menu) + 3, 34 + i * 18, 244, 1);
                 continue;
             }
+            // Settings divides the original items from the native ones with a line
+            // instead of a separator row, keeping all rows inside a 340-point window.
+            if (menu == 2 && i == kAnimationSpeedItem)
+            {
+                setGrayscale(rendererPtr, 0);
+                drawRectangle(rendererPtr, menuLeft(menu) + 3, 22 + i * 18, 244, 1);
+                setGrayscale(rendererPtr, selected ? 255 : menuItemEnabled(menu, i) ? 0 : 150);
+            }
             if (menu == 2 && i == 0)
                 label = animation.soundEnabled ? "Turn Sound Off" : "Turn Sound On";
             if (menu == 2 && i == 1)
@@ -356,6 +460,7 @@ void Application::renderMenus()
             if ((menu == 2 && (i == 2 + settings.white_player || i == 5 + settings.black_player)) ||
                 (menu == 2 && i == kRotateItem && rotateFlat) ||
                 (menu == 2 && i == kAutoRotateItem && autoRotate) ||
+                (menu == 2 && i == kRotate3DItem && rotate3D) ||
                 (menu == 2 && i == kIdleAnimationsItem && idle.enabled()) ||
                 (menu == 2 && i == kCoordinatesItem && showCoordinates) ||
                 (menu == 2 && i == kCapturedItem && showCaptured) ||
@@ -454,7 +559,11 @@ void Application::renderDialogs()
             drawRectangle(rendererPtr, x + prefixWidth, y, 1, textHeight);
         }
     }
-    if (alertId)
+    if (alertId == kGifSideAlert)
+    {
+        renderGifSidePrompt();
+    }
+    else if (alertId)
     {
         const char* params[] = {message.c_str(), "", "", ""};
         require(drawResourceDialog(rendererPtr,
@@ -483,8 +592,7 @@ void Application::render()
     // GETCOMMA 0x2744 / CHANGECU 0x10cd6: System CURS4 while input is blocked,
     // CURS400 during search, CURS401 in check. Native dialogs retain the arrow.
     SDL_Cursor* cursor = SDL_GetDefaultCursor();
-    if (mouseX >= 0 && mouseX < viewWidth() && mouseY >= 20 &&
-        mouseY < 20 + original_content_height && menu < 0 && !alertId && !textDialog.open &&
+    if (overBoard(int(mouseX), int(mouseY)) && menu < 0 && !alertId && !textDialog.open &&
         !fileWaiting && !editing && session.promotion.empty())
     {
         if (computer.busy())
